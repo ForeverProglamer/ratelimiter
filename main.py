@@ -35,10 +35,10 @@ def generate_server_response_headers(requests_count: int = 20, ratelimit_limit: 
 
 class HttpClient:
     def __init__(self) -> None:
-        self.first_request_sent = False
+        self.is_first_request_initiated = False
+        self.first_response_received = asyncio.Event()
         self.ratelimit = None
         self.requests_sent_in_time_window = 0  # Misleading name, it is rather `requests_started_count`.
-        self.first_request_sent_event = asyncio.Event()
         self.condition = asyncio.Condition()
         self.bg_task = asyncio.create_task(self._notify_when_ratelimit_resets())
 
@@ -55,13 +55,13 @@ class HttpClient:
     async def request(self, url: str, ratelimit: RateLimit) -> None:
         host, id_ = url.split(" ")
         
-        if not self.first_request_sent:
-            self.first_request_sent = True
+        if not self.is_first_request_initiated:
+            self.is_first_request_initiated = True
             await self._send_request(url, ratelimit)
-            self.first_request_sent_event.set()
+            self.first_response_received.set()
             return
         
-        await self.first_request_sent_event.wait()
+        await self.first_response_received.wait()
 
         if self.ratelimit and self.requests_sent_in_time_window == self.ratelimit.limit:
             logging.info(f"Task of requesting {url} is going to wait...")

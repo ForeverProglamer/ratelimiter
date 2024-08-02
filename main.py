@@ -37,44 +37,60 @@ class HttpClient:
     def __init__(self) -> None:
         self.is_first_request_initiated = False
         self.first_response_received = asyncio.Event()
+        self.rest_of_remaining_requests_sent = asyncio.Event()
+        self.incoming_requests_count = 0
+        self.requests_sent_in_time_window = 0
         self.ratelimit = None
-        self.concurrent_requests_count = 0
         self.condition = asyncio.Condition()
         self.bg_task = asyncio.create_task(self._notify_when_ratelimit_resets())
 
     async def _notify_when_ratelimit_resets(self) -> None:
         while True:
-            now = datetime.now(UTC)
-            if self.ratelimit and now >= self.ratelimit.reset and self.concurrent_requests_count == 0:
+            if self.incoming_requests_count == 0:
+                await asyncio.sleep(0.3)
+                continue
+
+            if not self.is_first_request_initiated:
                 async with self.condition:
-                    logging.info(f"Reseting sent requests, notifying {self.ratelimit.limit} tasks, reset={self.ratelimit.reset.strftime(datefmt)}")
-                    self.condition.notify(self.ratelimit.limit)
-            await asyncio.sleep(0.3)
+                    logging.info("Waking the first task up...")
+                    self.condition.notify()
+                    self.rest_of_remaining_requests_sent.clear()
+
+            await self.first_response_received.wait()
+
+            async with self.condition:
+                logging.info(f"Notifying {self.ratelimit.limit - 1} tasks, reset={self.ratelimit.reset.strftime(datefmt)}")
+                self.condition.notify(self.ratelimit.limit - 1)
+
+            await self.rest_of_remaining_requests_sent.wait()
+
+            self.is_first_request_initiated = False
+            self.first_response_received.clear()
 
     async def request(self, url: str, ratelimit: RateLimit) -> None:
         host, id_ = url.split(" ")
         
+        async with self.condition:
+            logging.info(f"Task of requesting {url} is going to wait...")
+            self.incoming_requests_count += 1
+            await self.condition.wait()
+
         if not self.is_first_request_initiated:
             self.is_first_request_initiated = True
             await self._send_request(url, ratelimit)
+            self.ratelimit = ratelimit
             self.first_response_received.set()
             return
-        
-        await self.first_response_received.wait()
 
-        if self.ratelimit and self.concurrent_requests_count == self.ratelimit.limit:
-            logging.info(f"Task of requesting {url} is going to wait...")
-            async with self.condition:
-                await self.condition.wait()
-        
         await self._send_request(url, ratelimit)
 
     async def _send_request(self, url: str, ratelimit: RateLimit) -> None:
         logging.info(f"Sending request to {url}, {ratelimit=}...")
-        self.concurrent_requests_count += 1
         await asyncio.sleep(1)
-        self.ratelimit = ratelimit
-        self.concurrent_requests_count -= 1
+        self.requests_sent_in_time_window += 1
+        if self.ratelimit and self.requests_sent_in_time_window == self.ratelimit.limit:
+            self.rest_of_remaining_requests_sent.set()
+            self.requests_sent_in_time_window = 0
         logging.info(f"Response received for {url}!")
 
 

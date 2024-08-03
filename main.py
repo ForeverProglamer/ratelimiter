@@ -98,14 +98,13 @@ class HttpClient:
             requests_info.ratelimit = ratelimit
             requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS if datetime.now(UTC) < requests_info.ratelimit.reset else Stage.WAITING_FOR_RESET
 
-    async def _send_request(self, url: str, ratelimit: RateLimit) -> None:
-        host, _ = url.split(" ")
-        requests_info = self.host_to_requests_info[host]
-        logging.info(f"Sending request to {url}, {ratelimit=}...")
-        await asyncio.sleep(1)
         requests_info.requests_sent_in_time_window += 1
         if requests_info.ratelimit and requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit:
             requests_info.stage = Stage.WAITING_FOR_RESET
+
+    async def _send_request(self, url: str, ratelimit: RateLimit) -> None:
+        logging.info(f"Sending request to {url}, {ratelimit=}...")
+        await asyncio.sleep(1)
         logging.info(f"Response received for {url}!")
 
 

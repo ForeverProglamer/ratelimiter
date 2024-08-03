@@ -1,4 +1,5 @@
 import asyncio
+from collections import defaultdict
 import logging
 import time
 from dataclasses import dataclass, field
@@ -51,14 +52,8 @@ class RateLimiter:
 
 class HttpClient:
     def __init__(self) -> None:
-        self.host_to_ratelimiter: dict[str, RateLimiter] = {}
+        self.host_to_ratelimiter: dict[str, RateLimiter] = defaultdict(lambda: RateLimiter())
         self.bg_task = asyncio.create_task(self._notify_when_ratelimit_resets())
-
-    def get_ratelimiter(self, host: str) -> RateLimiter:
-        if not (ratelimiter := self.host_to_ratelimiter.get(host)):
-            self.host_to_ratelimiter[host] = RateLimiter()
-            ratelimiter = self.host_to_ratelimiter[host]
-        return ratelimiter
 
     async def _notify_when_ratelimit_resets(self) -> None:
         while True:
@@ -77,7 +72,7 @@ class HttpClient:
 
     async def request(self, url: str, ratelimit: RateLimit) -> None:
         host, id_ = url.split(" ")
-        ratelimiter = self.get_ratelimiter(host)
+        ratelimiter = self.host_to_ratelimiter[host]
         
         async with ratelimiter.condition:
             logging.info(f"Task of requesting {url} is going to wait...")
@@ -93,7 +88,8 @@ class HttpClient:
         await self._send_request(url, ratelimit)
 
     async def _send_request(self, url: str, ratelimit: RateLimit) -> None:
-        ratelimiter = self.get_ratelimiter(url.split(" ")[0])
+        host, _ = url.split(" ")
+        ratelimiter = self.host_to_ratelimiter[host]
         logging.info(f"Sending request to {url}, {ratelimit=}...")
         await asyncio.sleep(1)
         ratelimiter.requests_sent_in_time_window += 1

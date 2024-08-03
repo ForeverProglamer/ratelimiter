@@ -83,12 +83,12 @@ class HttpClient:
 
         if requests_info.stage == Stage.FETCH_RATELIMIT:
             requests_info.stage = Stage.FETCHING_RATELIMIT
-            await self._send_request(url, ratelimit)
-            requests_info.ratelimit = ratelimit
-            requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS if datetime.now(UTC) < requests_info.ratelimit.reset else Stage.FETCH_RATELIMIT
-            return
 
         await self._send_request(url, ratelimit)
+
+        if requests_info.stage == Stage.FETCHING_RATELIMIT:
+            requests_info.ratelimit = ratelimit
+            requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS if datetime.now(UTC) < requests_info.ratelimit.reset else Stage.FETCH_RATELIMIT
 
     async def _send_request(self, url: str, ratelimit: RateLimit) -> None:
         host, _ = url.split(" ")

@@ -40,6 +40,7 @@ class Stage(StrEnum):
     FETCHING_RATELIMIT = "fetching_ratelimit"
     SEND_CONCURRENT_REQUESTS = "send_concurrent_requests"
     SENDING_CONCURRENT_REQUESTS = "sending_concurrent_requests"
+    WAITING_FOR_RESET = "waiting_for_reset"
 
 
 @dataclass
@@ -57,6 +58,7 @@ class HttpClient:
 
     async def _control_tasks_notification(self) -> None:
         while True:
+            now = datetime.now(UTC)
             for host, requests_info in self.host_to_requests_info.items():
                 if requests_info.stage == Stage.FETCH_RATELIMIT:
                     async with requests_info.condition:
@@ -70,6 +72,12 @@ class HttpClient:
                         )
                         requests_info.stage = Stage.SENDING_CONCURRENT_REQUESTS
                         requests_info.condition.notify(requests_info.ratelimit.limit - 1)  # type: ignore
+                elif (
+                    requests_info.stage == Stage.WAITING_FOR_RESET and
+                    now >= requests_info.ratelimit.reset  # type: ignore
+                ):
+                    requests_info.stage = Stage.FETCH_RATELIMIT
+                    requests_info.requests_sent_in_time_window = 0
 
             await asyncio.sleep(0.3)
 
@@ -88,7 +96,7 @@ class HttpClient:
 
         if requests_info.stage == Stage.FETCHING_RATELIMIT:
             requests_info.ratelimit = ratelimit
-            requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS if datetime.now(UTC) < requests_info.ratelimit.reset else Stage.FETCH_RATELIMIT
+            requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS if datetime.now(UTC) < requests_info.ratelimit.reset else Stage.WAITING_FOR_RESET
 
     async def _send_request(self, url: str, ratelimit: RateLimit) -> None:
         host, _ = url.split(" ")
@@ -96,12 +104,8 @@ class HttpClient:
         logging.info(f"Sending request to {url}, {ratelimit=}...")
         await asyncio.sleep(1)
         requests_info.requests_sent_in_time_window += 1
-        if (
-            requests_info.stage == Stage.SENDING_CONCURRENT_REQUESTS and
-            requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit  # type: ignore
-        ):
-            requests_info.stage = Stage.FETCH_RATELIMIT
-            requests_info.requests_sent_in_time_window = 0
+        if requests_info.ratelimit and requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit:
+            requests_info.stage = Stage.WAITING_FOR_RESET
         logging.info(f"Response received for {url}!")
 
 
@@ -111,7 +115,6 @@ async def main() -> None:
         *[client.request(f"host-a {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(15))],
         *[client.request(f"host-b {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(10))]
     )
-    logging.info(f"{client.host_to_requests_info=}")
 
 
 if __name__ == "__main__":

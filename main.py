@@ -43,7 +43,7 @@ class Stage(StrEnum):
 
 
 @dataclass
-class RateLimiter:
+class HostRequestsInfo:
     requests_sent_in_time_window: int = 0
     ratelimit: RateLimit | None = None
     stage: Stage = Stage.FETCH_RATELIMIT
@@ -52,50 +52,56 @@ class RateLimiter:
 
 class HttpClient:
     def __init__(self) -> None:
-        self.host_to_ratelimiter: dict[str, RateLimiter] = defaultdict(lambda: RateLimiter())
-        self.bg_task = asyncio.create_task(self._notify_when_ratelimit_resets())
+        self.host_to_requests_info: dict[str, HostRequestsInfo] = defaultdict(lambda: HostRequestsInfo())
+        self.bg_task = asyncio.create_task(self._control_tasks_notification())
 
-    async def _notify_when_ratelimit_resets(self) -> None:
+    async def _control_tasks_notification(self) -> None:
         while True:
-            for host, ratelimiter in self.host_to_ratelimiter.items():
-                if ratelimiter.stage == Stage.FETCH_RATELIMIT:
-                    async with ratelimiter.condition:
+            for host, requests_info in self.host_to_requests_info.items():
+                if requests_info.stage == Stage.FETCH_RATELIMIT:
+                    async with requests_info.condition:
                         logging.info(f"{host} | notifying 1 task to fetch ratelimit...")
-                        ratelimiter.condition.notify()
-                elif ratelimiter.stage == Stage.SEND_CONCURRENT_REQUESTS:
-                    async with ratelimiter.condition:
-                        logging.info(f"{host} | notifying {ratelimiter.ratelimit.limit - 1} tasks, reset={ratelimiter.ratelimit.reset.strftime(datefmt)}")  # type: ignore
-                        ratelimiter.stage = Stage.SENDING_CONCURRENT_REQUESTS
-                        ratelimiter.condition.notify(ratelimiter.ratelimit.limit - 1)  # type: ignore
+                        requests_info.condition.notify()
+                elif requests_info.stage == Stage.SEND_CONCURRENT_REQUESTS:
+                    async with requests_info.condition:
+                        logging.info(
+                            f"{host} | notifying {requests_info.ratelimit.limit - 1} tasks, "  # type: ignore
+                            f"reset={requests_info.ratelimit.reset.strftime(datefmt)}"  # type: ignore
+                        )
+                        requests_info.stage = Stage.SENDING_CONCURRENT_REQUESTS
+                        requests_info.condition.notify(requests_info.ratelimit.limit - 1)  # type: ignore
 
             await asyncio.sleep(0.3)
 
     async def request(self, url: str, ratelimit: RateLimit) -> None:
         host, id_ = url.split(" ")
-        ratelimiter = self.host_to_ratelimiter[host]
+        requests_info = self.host_to_requests_info[host]
         
-        async with ratelimiter.condition:
+        async with requests_info.condition:
             logging.info(f"Task of requesting {url} is going to wait...")
-            await ratelimiter.condition.wait()
+            await requests_info.condition.wait()
 
-        if ratelimiter.stage == Stage.FETCH_RATELIMIT:
-            ratelimiter.stage = Stage.FETCHING_RATELIMIT
+        if requests_info.stage == Stage.FETCH_RATELIMIT:
+            requests_info.stage = Stage.FETCHING_RATELIMIT
             await self._send_request(url, ratelimit)
-            ratelimiter.ratelimit = ratelimit
-            ratelimiter.stage = Stage.SEND_CONCURRENT_REQUESTS if datetime.now(UTC) < ratelimiter.ratelimit.reset else Stage.FETCH_RATELIMIT
+            requests_info.ratelimit = ratelimit
+            requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS if datetime.now(UTC) < requests_info.ratelimit.reset else Stage.FETCH_RATELIMIT
             return
 
         await self._send_request(url, ratelimit)
 
     async def _send_request(self, url: str, ratelimit: RateLimit) -> None:
         host, _ = url.split(" ")
-        ratelimiter = self.host_to_ratelimiter[host]
+        requests_info = self.host_to_requests_info[host]
         logging.info(f"Sending request to {url}, {ratelimit=}...")
         await asyncio.sleep(1)
-        ratelimiter.requests_sent_in_time_window += 1
-        if ratelimiter.stage == Stage.SENDING_CONCURRENT_REQUESTS and ratelimiter.requests_sent_in_time_window == ratelimiter.ratelimit.limit:  # type: ignore
-            ratelimiter.stage = Stage.FETCH_RATELIMIT
-            ratelimiter.requests_sent_in_time_window = 0
+        requests_info.requests_sent_in_time_window += 1
+        if (
+            requests_info.stage == Stage.SENDING_CONCURRENT_REQUESTS and
+            requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit  # type: ignore
+        ):
+            requests_info.stage = Stage.FETCH_RATELIMIT
+            requests_info.requests_sent_in_time_window = 0
         logging.info(f"Response received for {url}!")
 
 
@@ -105,7 +111,7 @@ async def main() -> None:
         *[client.request(f"host-a {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(15))],
         *[client.request(f"host-b {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(10))]
     )
-    logging.info(f"{client.host_to_ratelimiter=}")
+    logging.info(f"{client.host_to_requests_info=}")
 
 
 if __name__ == "__main__":

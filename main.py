@@ -46,6 +46,7 @@ class Stage(StrEnum):
 @dataclass
 class HostRequestsInfo:
     requests_sent_in_time_window: int = 0
+    incoming_requests: int = 0
     ratelimit: RateLimit | None = None
     stage: Stage = Stage.FETCH_RATELIMIT
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
@@ -54,10 +55,11 @@ class HostRequestsInfo:
 class HttpClient:
     def __init__(self) -> None:
         self.host_to_requests_info: dict[str, HostRequestsInfo] = defaultdict(lambda: HostRequestsInfo())
+        self.run_bg_task = True
         self.bg_task = asyncio.create_task(self._control_tasks_notification())
 
     async def _control_tasks_notification(self) -> None:
-        while True:
+        while self.run_bg_task:
             now = datetime.now(UTC)
             for host, requests_info in self.host_to_requests_info.items():
                 if requests_info.stage == Stage.FETCH_RATELIMIT:
@@ -87,6 +89,7 @@ class HttpClient:
         
         async with requests_info.condition:
             logging.info(f"Task of requesting {url} is going to wait...")
+            requests_info.incoming_requests += 1
             await requests_info.condition.wait()
 
         if requests_info.stage == Stage.FETCH_RATELIMIT:
@@ -96,26 +99,64 @@ class HttpClient:
 
         if requests_info.stage == Stage.FETCHING_RATELIMIT:
             requests_info.ratelimit = ratelimit
-            requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS if datetime.now(UTC) < requests_info.ratelimit.reset else Stage.WAITING_FOR_RESET
+            if datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests > 1:
+                requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS
+            elif requests_info.incoming_requests == 1:
+                requests_info.stage = Stage.FETCH_RATELIMIT
+            else:
+                requests_info.stage = Stage.WAITING_FOR_RESET
 
         requests_info.requests_sent_in_time_window += 1
         if requests_info.ratelimit and requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit:
             requests_info.stage = Stage.WAITING_FOR_RESET
+
+        requests_info.incoming_requests -= 1
 
     async def _send_request(self, url: str, ratelimit: RateLimit) -> None:
         logging.info(f"Sending request to {url}, {ratelimit=}...")
         await asyncio.sleep(1)
         logging.info(f"Response received for {url}!")
 
+    async def close(self) -> None:
+        self.run_bg_task = False
+        await self.bg_task
 
-async def main() -> None:
+
+async def concurrent_requests_single_host_run() -> None:
+    logging.info("Concurrent Requests Single Host Run")
     client = HttpClient()
     await asyncio.gather(
         *[client.request(f"host-a {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(15))],
-        *[client.request(f"host-b {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(10))]
     )
+    await client.close()
+    logging.info(f"{client.host_to_requests_info=}\n")
+
+
+async def concurrent_requests_multiple_hosts_run() -> None:
+    logging.info("Concurrent Requests Multiple Hosts Run")
+    client = HttpClient()
+    await asyncio.gather(
+        *[client.request(f"host-b {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(15))],
+        *[client.request(f"host-c {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(10))]
+    )
+    await client.close()
+    logging.info(f"{client.host_to_requests_info=}\n")
+
+
+async def sequential_requests_single_host_run() -> None:
+    logging.info("Sequential Requests Single Host Run")
+    client = HttpClient()
+    for i, ratelimit in enumerate(generate_server_response_headers(requests_count=6, ratelimit_limit=2)):
+        await client.request(f"host-d {i+1}", ratelimit)
+    await client.close()
+    logging.info(f"{client.host_to_requests_info=}\n")
+
+
+async def main() -> None:
+    await concurrent_requests_single_host_run()
+    await concurrent_requests_multiple_hosts_run()
+    await sequential_requests_single_host_run()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-

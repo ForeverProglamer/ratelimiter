@@ -101,7 +101,7 @@ class HttpClient:
             requests_info.ratelimit = ratelimit
             if datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests > 1:
                 requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS
-            elif requests_info.incoming_requests == 1:
+            elif datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests == 1:
                 requests_info.stage = Stage.FETCH_RATELIMIT
             else:
                 requests_info.stage = Stage.WAITING_FOR_RESET

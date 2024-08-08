@@ -36,8 +36,8 @@ def generate_server_response_headers(requests_count: int = 20, ratelimit_limit: 
 
 
 class Stage(StrEnum):
-    FETCH_RATELIMIT = "fetch_ratelimit"
-    FETCHING_RATELIMIT = "fetching_ratelimit"
+    SEND_ONE_REQUEST = "send_one_request"
+    SENDING_ONE_REQUEST = "sending_one_request"
     SEND_CONCURRENT_REQUESTS = "send_concurrent_requests"
     SENDING_CONCURRENT_REQUESTS = "sending_concurrent_requests"
     WAITING_FOR_RESET = "waiting_for_reset"
@@ -48,7 +48,7 @@ class HostRequestsInfo:
     requests_sent_in_time_window: int = 0
     incoming_requests: int = 0
     ratelimit: RateLimit | None = None
-    stage: Stage = Stage.FETCH_RATELIMIT
+    stage: Stage = Stage.SEND_ONE_REQUEST
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
@@ -62,7 +62,7 @@ class HttpClient:
         while self.run_bg_task:
             now = datetime.now(UTC)
             for host, requests_info in self.host_to_requests_info.items():
-                if requests_info.stage == Stage.FETCH_RATELIMIT:
+                if requests_info.stage == Stage.SEND_ONE_REQUEST:
                     async with requests_info.condition:
                         logging.info(f"{host} | notifying 1 task to fetch ratelimit...")
                         requests_info.condition.notify()
@@ -78,7 +78,7 @@ class HttpClient:
                     requests_info.stage == Stage.WAITING_FOR_RESET and
                     now >= requests_info.ratelimit.reset  # type: ignore
                 ):
-                    requests_info.stage = Stage.FETCH_RATELIMIT
+                    requests_info.stage = Stage.SEND_ONE_REQUEST
                     requests_info.requests_sent_in_time_window = 0
 
             await asyncio.sleep(0.3)
@@ -93,17 +93,17 @@ class HttpClient:
             await requests_info.condition.wait()
         requests_info.incoming_requests -= 1
 
-        if requests_info.stage == Stage.FETCH_RATELIMIT:
-            requests_info.stage = Stage.FETCHING_RATELIMIT
+        if requests_info.stage == Stage.SEND_ONE_REQUEST:
+            requests_info.stage = Stage.SENDING_ONE_REQUEST
 
         await self._send_request(url, ratelimit)
 
-        if requests_info.stage == Stage.FETCHING_RATELIMIT:
+        if requests_info.stage == Stage.SENDING_ONE_REQUEST:
             requests_info.ratelimit = ratelimit
             if datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests >= 1:
                 requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS
             elif datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests == 0:
-                requests_info.stage = Stage.FETCH_RATELIMIT
+                requests_info.stage = Stage.SEND_ONE_REQUEST
             else:
                 requests_info.stage = Stage.WAITING_FOR_RESET
 

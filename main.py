@@ -91,6 +91,7 @@ class HttpClient:
             logging.info(f"Task of requesting {url} is going to wait...")
             requests_info.incoming_requests += 1
             await requests_info.condition.wait()
+        requests_info.incoming_requests -= 1
 
         if requests_info.stage == Stage.FETCH_RATELIMIT:
             requests_info.stage = Stage.FETCHING_RATELIMIT
@@ -99,9 +100,9 @@ class HttpClient:
 
         if requests_info.stage == Stage.FETCHING_RATELIMIT:
             requests_info.ratelimit = ratelimit
-            if datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests > 1:
+            if datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests >= 1:
                 requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS
-            elif datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests == 1:
+            elif datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests == 0:
                 requests_info.stage = Stage.FETCH_RATELIMIT
             else:
                 requests_info.stage = Stage.WAITING_FOR_RESET
@@ -109,8 +110,6 @@ class HttpClient:
         requests_info.requests_sent_in_time_window += 1
         if requests_info.ratelimit and requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit:
             requests_info.stage = Stage.WAITING_FOR_RESET
-
-        requests_info.incoming_requests -= 1
 
     async def _send_request(self, url: str, ratelimit: RateLimit) -> None:
         logging.info(f"Sending request to {url}, {ratelimit=}...")

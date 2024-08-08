@@ -98,17 +98,24 @@ class HttpClient:
 
         await self._send_request(url, ratelimit)
 
+        requests_info.requests_sent_in_time_window += 1
+
+        now = datetime.now(UTC)
         if requests_info.stage == Stage.SENDING_ONE_REQUEST:
             requests_info.ratelimit = ratelimit
-            if datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests >= 1:
-                requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS
-            elif datetime.now(UTC) < requests_info.ratelimit.reset and requests_info.incoming_requests == 0:
-                requests_info.stage = Stage.SEND_ONE_REQUEST
-            else:
+            if (
+                now >= requests_info.ratelimit.reset or
+                requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit
+            ):
                 requests_info.stage = Stage.WAITING_FOR_RESET
-
-        requests_info.requests_sent_in_time_window += 1
-        if requests_info.ratelimit and requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit:
+            elif now < requests_info.ratelimit.reset and requests_info.incoming_requests >= 1:
+                requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS
+            elif now < requests_info.ratelimit.reset and requests_info.incoming_requests == 0:
+                requests_info.stage = Stage.SEND_ONE_REQUEST
+        elif requests_info.stage == Stage.SENDING_CONCURRENT_REQUESTS and requests_info.ratelimit and (
+            now >= requests_info.ratelimit.reset or
+            requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit
+        ):
             requests_info.stage = Stage.WAITING_FOR_RESET
 
     async def _send_request(self, url: str, ratelimit: RateLimit) -> None:

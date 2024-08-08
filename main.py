@@ -62,7 +62,7 @@ class HttpClient:
         while self.run_bg_task:
             now = datetime.now(UTC)
             for host, requests_info in self.host_to_requests_info.items():
-                if requests_info.stage == Stage.SEND_ONE_REQUEST:
+                if requests_info.stage == Stage.SEND_ONE_REQUEST and requests_info.incoming_requests > 0:
                     async with requests_info.condition:
                         logging.info(f"{host} | notifying 1 task to fetch ratelimit...")
                         requests_info.condition.notify()

@@ -44,6 +44,7 @@ class Stage(StrEnum):
     SEND_CONCURRENT_REQUESTS = "send_concurrent_requests"
     SENDING_CONCURRENT_REQUESTS = "sending_concurrent_requests"
     WAITING_FOR_RESET = "waiting_for_reset"
+    NO_LIMITS = "no_limits"
 
 
 @dataclass
@@ -66,7 +67,11 @@ class HttpClient:
         while self.run_bg_task:
             now = datetime.now(UTC)
             for host, requests_info in self.host_to_requests_info.items():
-                if requests_info.stage == Stage.SEND_ONE_REQUEST and requests_info.incoming_requests > 0:
+                if requests_info.stage == Stage.NO_LIMITS and requests_info.incoming_requests > 0:
+                    async with requests_info.condition:
+                        logging.info(f"{host} | notifying all tasks...")
+                        requests_info.condition.notify_all()
+                elif requests_info.stage == Stage.SEND_ONE_REQUEST and requests_info.incoming_requests > 0:
                     async with requests_info.condition:
                         logging.info(f"{host} | notifying 1 task to fetch ratelimit...")
                         requests_info.condition.notify()
@@ -107,7 +112,7 @@ class HttpClient:
         wait=wait_fixed(0.5),
         before=before_log(logger, logging.DEBUG)
     )
-    async def request(self, url: str, ratelimit: RateLimit, raise_error: bool = False, retryable_error: bool = True) -> None:
+    async def request(self, url: str, ratelimit: RateLimit | None = None, raise_error: bool = False, retryable_error: bool = True) -> None:
         host, id_ = url.split(" ")
         requests_info = self.host_to_requests_info[host]
         
@@ -147,7 +152,7 @@ class HttpClient:
             ):
                 requests_info.stage = Stage.WAITING_FOR_RESET
 
-    async def _send_request(self, url: str, ratelimit: RateLimit, raise_error: bool = False, retryable_error: bool = True) -> None:
+    async def _send_request(self, url: str, ratelimit: RateLimit | None = None, raise_error: bool = False, retryable_error: bool = True) -> None:
         host, _ = url.split(" ")
         requests_info = self.host_to_requests_info[host]
 
@@ -155,6 +160,8 @@ class HttpClient:
         await asyncio.sleep(1)
         if requests_info.stage == Stage.SENDING_ONE_REQUEST:
             requests_info.ratelimit = ratelimit
+            if ratelimit is None:
+                requests_info.stage = Stage.NO_LIMITS
         logging.info(f"Response received for {url}!")
 
         if raise_error:
@@ -210,12 +217,33 @@ async def concurrent_requests_single_host_retry_run() -> None:
     logging.info(f"{client.host_to_requests_info=}\n")
 
 
+async def concurrent_requests_without_limits_run() -> None:
+    logging.info("Concurrent Requests Without Limits Run")
+    client = HttpClient()
+    await asyncio.gather(
+        *[client.request(f"host-a {i+1}") for i in range(15)],
+    )
+    await client.close()
+    logging.info(f"{client.host_to_requests_info=}\n")
+
+
+async def sequential_requests_without_limits_run() -> None:
+    logging.info("Sequential Requests Without Limits Run")
+    client = HttpClient()
+    for i in range(15):
+        await client.request(f"host-a {i+1}")
+    await client.close()
+    logging.info(f"{client.host_to_requests_info=}\n")
+
+
 async def main() -> None:
     await concurrent_requests_single_host_run()
     await concurrent_requests_multiple_hosts_run()
     await sequential_requests_single_host_run()
 
     await concurrent_requests_single_host_retry_run()
+    await concurrent_requests_without_limits_run()
+    await sequential_requests_without_limits_run()
 
 
 if __name__ == "__main__":

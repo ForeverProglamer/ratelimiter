@@ -176,7 +176,7 @@ class HttpClient:
         await asyncio.sleep(1)
         if requests_limiter.stage == Stage.SENDING_ONE_REQUEST:
             if ratelimit is None:
-                # Headers don't contain rate limit info or it is format is 
+                # Headers don't contain rate limit info or its format is 
                 # invalid/unexpected.
                 requests_limiter.ratelimit = None
             else:

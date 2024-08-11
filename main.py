@@ -47,19 +47,19 @@ class Stage(StrEnum):
     NO_LIMITS = "no_limits"
 
 
-@dataclass
 class HostRequestsLimiter:
-    requests_sent_in_time_window: int = 0
-    incoming_requests: int = 0
-    ratelimit: RateLimit | None = None
-    stage: Stage = Stage.SEND_ONE_REQUEST
-    condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    def __init__(self, stage: Stage = Stage.SEND_ONE_REQUEST) -> None:
+        self.requests_sent_in_time_window = 0
+        self._incoming_requests = 0
+        self.ratelimit: RateLimit | None = None
+        self.stage: Stage = stage
+        self._condition = asyncio.Condition()
 
     async def wait_until_notified(self) -> None:
-        async with self.condition:
-            self.incoming_requests += 1
-            await self.condition.wait()
-        self.incoming_requests -= 1
+        async with self._condition:
+            self._incoming_requests += 1
+            await self._condition.wait()
+        self._incoming_requests -= 1
 
     def next_stage(self) -> None:
         now = datetime.now(UTC)
@@ -71,9 +71,9 @@ class HostRequestsLimiter:
                 self.requests_sent_in_time_window == self.ratelimit.limit
             ):
                 self.stage = Stage.WAITING_FOR_RESET
-            elif now < self.ratelimit.reset and self.incoming_requests >= 1:
+            elif now < self.ratelimit.reset and self._incoming_requests >= 1:
                 self.stage = Stage.SEND_CONCURRENT_REQUESTS
-            elif now < self.ratelimit.reset and self.incoming_requests == 0:
+            elif now < self.ratelimit.reset and self._incoming_requests == 0:
                 self.stage = Stage.SEND_ONE_REQUEST
         elif self.stage == Stage.SENDING_ONE_REQUEST:
             self.stage = Stage.NO_LIMITS
@@ -84,27 +84,27 @@ class HostRequestsLimiter:
             self.stage = Stage.WAITING_FOR_RESET
 
     async def notify(self, host: str, concurrent_requests: int) -> None:
-        if self.stage == Stage.NO_LIMITS and self.incoming_requests > 0:
-            async with self.condition:
+        if self.stage == Stage.NO_LIMITS and self._incoming_requests > 0:
+            async with self._condition:
                 logging.info(f"{host} | notifying all tasks...")
-                self.condition.notify_all()
-        elif self.stage == Stage.SEND_ONE_REQUEST and self.incoming_requests > 0:
-            async with self.condition:
+                self._condition.notify_all()
+        elif self.stage == Stage.SEND_ONE_REQUEST and self._incoming_requests > 0:
+            async with self._condition:
                 logging.info(f"{host} | notifying 1 task to fetch ratelimit...")
-                self.condition.notify()
+                self._condition.notify()
         elif self.stage == Stage.SEND_CONCURRENT_REQUESTS and self.ratelimit:
-            async with self.condition:
+            async with self._condition:
                 logging.info(
                     f"{host} | notifying {self.ratelimit.limit - 1} tasks, "
                     f"reset={self.ratelimit.reset.strftime(datefmt)}"
                 )
                 self.stage = Stage.SENDING_CONCURRENT_REQUESTS
-                self.condition.notify(self.ratelimit.limit - 1)
+                self._condition.notify(self.ratelimit.limit - 1)
         elif self.stage == Stage.SENDING_CONCURRENT_REQUESTS and self.ratelimit and (
             self.requests_sent_in_time_window + concurrent_requests
             < self.ratelimit.limit
-        ) and self.incoming_requests > 0:
-            async with self.condition:
+        ) and self._incoming_requests > 0:
+            async with self._condition:
                 tasks_to_notify = (
                     self.ratelimit.limit -
                     (self.requests_sent_in_time_window + concurrent_requests)
@@ -113,7 +113,7 @@ class HostRequestsLimiter:
                     f"{host} | notifying additional {tasks_to_notify} tasks, "
                     f"reset={self.ratelimit.reset.strftime(datefmt)}"
                 )
-                self.condition.notify(tasks_to_notify)
+                self._condition.notify(tasks_to_notify)
         elif (
             self.stage == Stage.WAITING_FOR_RESET and self.ratelimit and
             datetime.now(UTC) >= self.ratelimit.reset

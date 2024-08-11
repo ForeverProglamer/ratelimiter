@@ -48,7 +48,8 @@ class Stage(StrEnum):
 
 
 class HostRequestsLimiter:
-    def __init__(self, stage: Stage = Stage.SEND_ONE_REQUEST) -> None:
+    def __init__(self, host: str, stage: Stage = Stage.SEND_ONE_REQUEST) -> None:
+        self.host = host
         self.requests_sent_in_time_window = 0
         self._incoming_requests = 0
         self.ratelimit: RateLimit | None = None
@@ -83,19 +84,19 @@ class HostRequestsLimiter:
         ):
             self.stage = Stage.WAITING_FOR_RESET
 
-    async def notify(self, host: str, concurrent_requests: int) -> None:
+    async def notify(self, concurrent_requests: int) -> None:
         if self.stage == Stage.NO_LIMITS and self._incoming_requests > 0:
             async with self._condition:
-                logging.info(f"{host} | notifying all tasks...")
+                logging.info(f"{self.host} | notifying all tasks...")
                 self._condition.notify_all()
         elif self.stage == Stage.SEND_ONE_REQUEST and self._incoming_requests > 0:
             async with self._condition:
-                logging.info(f"{host} | notifying 1 task to fetch ratelimit...")
+                logging.info(f"{self.host} | notifying 1 task to fetch ratelimit...")
                 self._condition.notify()
         elif self.stage == Stage.SEND_CONCURRENT_REQUESTS and self.ratelimit:
             async with self._condition:
                 logging.info(
-                    f"{host} | notifying {self.ratelimit.limit - 1} tasks, "
+                    f"{self.host} | notifying {self.ratelimit.limit - 1} tasks, "
                     f"reset={self.ratelimit.reset.strftime(datefmt)}"
                 )
                 self.stage = Stage.SENDING_CONCURRENT_REQUESTS
@@ -110,7 +111,7 @@ class HostRequestsLimiter:
                     (self.requests_sent_in_time_window + concurrent_requests)
                 )
                 logging.info(
-                    f"{host} | notifying additional {tasks_to_notify} tasks, "
+                    f"{self.host} | notifying additional {tasks_to_notify} tasks, "
                     f"reset={self.ratelimit.reset.strftime(datefmt)}"
                 )
                 self._condition.notify(tasks_to_notify)
@@ -124,15 +125,21 @@ class HostRequestsLimiter:
 
 class HttpClient:
     def __init__(self) -> None:
-        self.host_to_requests_limiter: dict[str, HostRequestsLimiter] = defaultdict(lambda: HostRequestsLimiter())
+        self.host_to_requests_limiter: dict[str, HostRequestsLimiter] = {}
         self.run_bg_task = True
         self.bg_task = asyncio.create_task(self._control_tasks_notification())
         self.concurrent_requests: dict[str, int] = Counter()
 
+    def _get_requests_limiter(self, host: str) -> HostRequestsLimiter:
+        if not (requests_limiter := self.host_to_requests_limiter.get(host)):
+            self.host_to_requests_limiter[host] = HostRequestsLimiter(host)
+            requests_limiter = self.host_to_requests_limiter[host]
+        return requests_limiter
+
     async def _control_tasks_notification(self) -> None:
         while self.run_bg_task:
             for host, requests_limiter in self.host_to_requests_limiter.items():
-                await requests_limiter.notify(host, self.concurrent_requests[host])
+                await requests_limiter.notify(self.concurrent_requests[host])
             await asyncio.sleep(0.3)
 
     @retry(
@@ -143,7 +150,7 @@ class HttpClient:
     )
     async def request(self, url: str, ratelimit: RateLimit | None = None, raise_error: bool = False, retryable_error: bool = True) -> None:
         host, id_ = url.split(" ")
-        requests_limiter = self.host_to_requests_limiter[host]
+        requests_limiter = self._get_requests_limiter(host)
         
         logging.info(f"Task of requesting {url} is going to wait...")
         await requests_limiter.wait_until_notified()
@@ -163,7 +170,7 @@ class HttpClient:
 
     async def _send_request(self, url: str, ratelimit: RateLimit | None = None, raise_error: bool = False, retryable_error: bool = True) -> None:
         host, _ = url.split(" ")
-        requests_limiter = self.host_to_requests_limiter[host]
+        requests_limiter = self._get_requests_limiter(host)
 
         logging.info(f"Sending request to {url}, {ratelimit=}...")
         await asyncio.sleep(1)

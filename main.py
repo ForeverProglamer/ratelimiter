@@ -92,31 +92,31 @@ class HostRequestsLimiter:
             async with self.condition:
                 logging.info(f"{host} | notifying 1 task to fetch ratelimit...")
                 self.condition.notify()
-        elif self.stage == Stage.SEND_CONCURRENT_REQUESTS:
+        elif self.stage == Stage.SEND_CONCURRENT_REQUESTS and self.ratelimit:
             async with self.condition:
                 logging.info(
-                    f"{host} | notifying {self.ratelimit.limit - 1} tasks, "  # type: ignore
-                    f"reset={self.ratelimit.reset.strftime(datefmt)}"  # type: ignore
+                    f"{host} | notifying {self.ratelimit.limit - 1} tasks, "
+                    f"reset={self.ratelimit.reset.strftime(datefmt)}"
                 )
                 self.stage = Stage.SENDING_CONCURRENT_REQUESTS
-                self.condition.notify(self.ratelimit.limit - 1)  # type: ignore
-        elif self.stage == Stage.SENDING_CONCURRENT_REQUESTS and (
+                self.condition.notify(self.ratelimit.limit - 1)
+        elif self.stage == Stage.SENDING_CONCURRENT_REQUESTS and self.ratelimit and (
             self.requests_sent_in_time_window + concurrent_requests
-            < self.ratelimit.limit  # type: ignore
+            < self.ratelimit.limit
         ) and self.incoming_requests > 0:
             async with self.condition:
                 tasks_to_notify = (
-                    self.ratelimit.limit -   # type: ignore
+                    self.ratelimit.limit -
                     (self.requests_sent_in_time_window + concurrent_requests)
                 )
                 logging.info(
-                    f"{host} | notifying additional {tasks_to_notify} tasks, "  # type: ignore
-                    f"reset={self.ratelimit.reset.strftime(datefmt)}"  # type: ignore
+                    f"{host} | notifying additional {tasks_to_notify} tasks, "
+                    f"reset={self.ratelimit.reset.strftime(datefmt)}"
                 )
-                self.condition.notify(tasks_to_notify)  # type: ignore
+                self.condition.notify(tasks_to_notify)
         elif (
-            self.stage == Stage.WAITING_FOR_RESET and
-            datetime.now(UTC) >= self.ratelimit.reset  # type: ignore
+            self.stage == Stage.WAITING_FOR_RESET and self.ratelimit and
+            datetime.now(UTC) >= self.ratelimit.reset
         ):
             self.stage = Stage.SEND_ONE_REQUEST
             self.requests_sent_in_time_window = 0

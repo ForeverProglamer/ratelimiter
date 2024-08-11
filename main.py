@@ -48,62 +48,91 @@ class Stage(StrEnum):
 
 
 @dataclass
-class HostRequestsInfo:
+class HostRequestsLimiter:
     requests_sent_in_time_window: int = 0
     incoming_requests: int = 0
     ratelimit: RateLimit | None = None
     stage: Stage = Stage.SEND_ONE_REQUEST
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
+    async def wait_until_notified(self) -> None:
+        async with self.condition:
+            self.incoming_requests += 1
+            await self.condition.wait()
+        self.incoming_requests -= 1
+
+    def next_stage(self) -> None:
+        now = datetime.now(UTC)
+        if self.stage == Stage.SEND_ONE_REQUEST:
+            self.stage = Stage.SENDING_ONE_REQUEST
+        elif self.stage == Stage.SENDING_ONE_REQUEST and self.ratelimit:
+            if (
+                now >= self.ratelimit.reset or
+                self.requests_sent_in_time_window == self.ratelimit.limit
+            ):
+                self.stage = Stage.WAITING_FOR_RESET
+            elif now < self.ratelimit.reset and self.incoming_requests >= 1:
+                self.stage = Stage.SEND_CONCURRENT_REQUESTS
+            elif now < self.ratelimit.reset and self.incoming_requests == 0:
+                self.stage = Stage.SEND_ONE_REQUEST
+        elif self.stage == Stage.SENDING_ONE_REQUEST:
+            self.stage = Stage.NO_LIMITS
+        elif self.stage == Stage.SENDING_CONCURRENT_REQUESTS and self.ratelimit and (
+            now >= self.ratelimit.reset or
+            self.requests_sent_in_time_window == self.ratelimit.limit
+        ):
+            self.stage = Stage.WAITING_FOR_RESET
+
+    async def notify(self, host: str, concurrent_requests: int) -> None:
+        if self.stage == Stage.NO_LIMITS and self.incoming_requests > 0:
+            async with self.condition:
+                logging.info(f"{host} | notifying all tasks...")
+                self.condition.notify_all()
+        elif self.stage == Stage.SEND_ONE_REQUEST and self.incoming_requests > 0:
+            async with self.condition:
+                logging.info(f"{host} | notifying 1 task to fetch ratelimit...")
+                self.condition.notify()
+        elif self.stage == Stage.SEND_CONCURRENT_REQUESTS:
+            async with self.condition:
+                logging.info(
+                    f"{host} | notifying {self.ratelimit.limit - 1} tasks, "  # type: ignore
+                    f"reset={self.ratelimit.reset.strftime(datefmt)}"  # type: ignore
+                )
+                self.stage = Stage.SENDING_CONCURRENT_REQUESTS
+                self.condition.notify(self.ratelimit.limit - 1)  # type: ignore
+        elif self.stage == Stage.SENDING_CONCURRENT_REQUESTS and (
+            self.requests_sent_in_time_window + concurrent_requests
+            < self.ratelimit.limit  # type: ignore
+        ) and self.incoming_requests > 0:
+            async with self.condition:
+                tasks_to_notify = (
+                    self.ratelimit.limit -   # type: ignore
+                    (self.requests_sent_in_time_window + concurrent_requests)
+                )
+                logging.info(
+                    f"{host} | notifying additional {tasks_to_notify} tasks, "  # type: ignore
+                    f"reset={self.ratelimit.reset.strftime(datefmt)}"  # type: ignore
+                )
+                self.condition.notify(tasks_to_notify)  # type: ignore
+        elif (
+            self.stage == Stage.WAITING_FOR_RESET and
+            datetime.now(UTC) >= self.ratelimit.reset  # type: ignore
+        ):
+            self.stage = Stage.SEND_ONE_REQUEST
+            self.requests_sent_in_time_window = 0
+
 
 class HttpClient:
     def __init__(self) -> None:
-        self.host_to_requests_info: dict[str, HostRequestsInfo] = defaultdict(lambda: HostRequestsInfo())
+        self.host_to_requests_limiter: dict[str, HostRequestsLimiter] = defaultdict(lambda: HostRequestsLimiter())
         self.run_bg_task = True
         self.bg_task = asyncio.create_task(self._control_tasks_notification())
         self.concurrent_requests: dict[str, int] = Counter()
 
     async def _control_tasks_notification(self) -> None:
         while self.run_bg_task:
-            now = datetime.now(UTC)
-            for host, requests_info in self.host_to_requests_info.items():
-                if requests_info.stage == Stage.NO_LIMITS and requests_info.incoming_requests > 0:
-                    async with requests_info.condition:
-                        logging.info(f"{host} | notifying all tasks...")
-                        requests_info.condition.notify_all()
-                elif requests_info.stage == Stage.SEND_ONE_REQUEST and requests_info.incoming_requests > 0:
-                    async with requests_info.condition:
-                        logging.info(f"{host} | notifying 1 task to fetch ratelimit...")
-                        requests_info.condition.notify()
-                elif requests_info.stage == Stage.SEND_CONCURRENT_REQUESTS:
-                    async with requests_info.condition:
-                        logging.info(
-                            f"{host} | notifying {requests_info.ratelimit.limit - 1} tasks, "  # type: ignore
-                            f"reset={requests_info.ratelimit.reset.strftime(datefmt)}"  # type: ignore
-                        )
-                        requests_info.stage = Stage.SENDING_CONCURRENT_REQUESTS
-                        requests_info.condition.notify(requests_info.ratelimit.limit - 1)  # type: ignore
-                elif requests_info.stage == Stage.SENDING_CONCURRENT_REQUESTS and (
-                    requests_info.requests_sent_in_time_window + self.concurrent_requests[host] 
-                    < requests_info.ratelimit.limit  # type: ignore
-                ) and requests_info.incoming_requests > 0:
-                    async with requests_info.condition:
-                        tasks_to_notify = (
-                            requests_info.ratelimit.limit -   # type: ignore
-                            (requests_info.requests_sent_in_time_window + self.concurrent_requests[host])
-                        )
-                        logging.info(
-                            f"{host} | notifying additional {tasks_to_notify} tasks, "  # type: ignore
-                            f"reset={requests_info.ratelimit.reset.strftime(datefmt)}"  # type: ignore
-                        )
-                        requests_info.condition.notify(tasks_to_notify)  # type: ignore
-                elif (
-                    requests_info.stage == Stage.WAITING_FOR_RESET and
-                    now >= requests_info.ratelimit.reset  # type: ignore
-                ):
-                    requests_info.stage = Stage.SEND_ONE_REQUEST
-                    requests_info.requests_sent_in_time_window = 0
-
+            for host, requests_limiter in self.host_to_requests_limiter.items():
+                await requests_limiter.notify(host, self.concurrent_requests[host])
             await asyncio.sleep(0.3)
 
     @retry(
@@ -114,17 +143,13 @@ class HttpClient:
     )
     async def request(self, url: str, ratelimit: RateLimit | None = None, raise_error: bool = False, retryable_error: bool = True) -> None:
         host, id_ = url.split(" ")
-        requests_info = self.host_to_requests_info[host]
+        requests_limiter = self.host_to_requests_limiter[host]
         
-        async with requests_info.condition:
-            logging.info(f"Task of requesting {url} is going to wait...")
-            requests_info.incoming_requests += 1
-            await requests_info.condition.wait()
-        requests_info.incoming_requests -= 1
+        logging.info(f"Task of requesting {url} is going to wait...")
+        await requests_limiter.wait_until_notified()
         self.concurrent_requests[host] += 1
 
-        if requests_info.stage == Stage.SEND_ONE_REQUEST:
-            requests_info.stage = Stage.SENDING_ONE_REQUEST
+        requests_limiter.next_stage()
 
         try:
             await self._send_request(url, ratelimit, raise_error, retryable_error)
@@ -133,35 +158,22 @@ class HttpClient:
             raise
         finally:
             self.concurrent_requests[host] -= 1
-            requests_info.requests_sent_in_time_window += 1
-
-            now = datetime.now(UTC)
-            if requests_info.stage == Stage.SENDING_ONE_REQUEST and requests_info.ratelimit:
-                if (
-                    now >= requests_info.ratelimit.reset or
-                    requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit
-                ):
-                    requests_info.stage = Stage.WAITING_FOR_RESET
-                elif now < requests_info.ratelimit.reset and requests_info.incoming_requests >= 1:
-                    requests_info.stage = Stage.SEND_CONCURRENT_REQUESTS
-                elif now < requests_info.ratelimit.reset and requests_info.incoming_requests == 0:
-                    requests_info.stage = Stage.SEND_ONE_REQUEST
-            elif requests_info.stage == Stage.SENDING_CONCURRENT_REQUESTS and requests_info.ratelimit and (
-                now >= requests_info.ratelimit.reset or
-                requests_info.requests_sent_in_time_window == requests_info.ratelimit.limit
-            ):
-                requests_info.stage = Stage.WAITING_FOR_RESET
+            requests_limiter.requests_sent_in_time_window += 1
+            requests_limiter.next_stage()
 
     async def _send_request(self, url: str, ratelimit: RateLimit | None = None, raise_error: bool = False, retryable_error: bool = True) -> None:
         host, _ = url.split(" ")
-        requests_info = self.host_to_requests_info[host]
+        requests_limiter = self.host_to_requests_limiter[host]
 
         logging.info(f"Sending request to {url}, {ratelimit=}...")
         await asyncio.sleep(1)
-        if requests_info.stage == Stage.SENDING_ONE_REQUEST:
-            requests_info.ratelimit = ratelimit
+        if requests_limiter.stage == Stage.SENDING_ONE_REQUEST:
             if ratelimit is None:
-                requests_info.stage = Stage.NO_LIMITS
+                # Headers don't contain rate limit info or it is format is 
+                # invalid/unexpected.
+                requests_limiter.ratelimit = None
+            else:
+                requests_limiter.ratelimit = ratelimit
         logging.info(f"Response received for {url}!")
 
         if raise_error:
@@ -181,7 +193,7 @@ async def concurrent_requests_single_host_run() -> None:
         *[client.request(f"host-a {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(15))],
     )
     await client.close()
-    logging.info(f"{client.host_to_requests_info=}\n")
+    logging.info(f"{client.host_to_requests_limiter=}\n")
 
 
 async def concurrent_requests_multiple_hosts_run() -> None:
@@ -192,7 +204,7 @@ async def concurrent_requests_multiple_hosts_run() -> None:
         *[client.request(f"host-c {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(10))]
     )
     await client.close()
-    logging.info(f"{client.host_to_requests_info=}\n")
+    logging.info(f"{client.host_to_requests_limiter=}\n")
 
 
 async def sequential_requests_single_host_run() -> None:
@@ -201,7 +213,7 @@ async def sequential_requests_single_host_run() -> None:
     for i, ratelimit in enumerate(generate_server_response_headers(requests_count=6, ratelimit_limit=2)):
         await client.request(f"host-d {i+1}", ratelimit)
     await client.close()
-    logging.info(f"{client.host_to_requests_info=}\n")
+    logging.info(f"{client.host_to_requests_limiter=}\n")
 
 
 async def concurrent_requests_single_host_retry_run() -> None:
@@ -214,7 +226,7 @@ async def concurrent_requests_single_host_retry_run() -> None:
     )
     logging.info(f"{result=}")
     await client.close()
-    logging.info(f"{client.host_to_requests_info=}\n")
+    logging.info(f"{client.host_to_requests_limiter=}\n")
 
 
 async def concurrent_requests_without_limits_run() -> None:
@@ -224,7 +236,7 @@ async def concurrent_requests_without_limits_run() -> None:
         *[client.request(f"host-a {i+1}") for i in range(15)],
     )
     await client.close()
-    logging.info(f"{client.host_to_requests_info=}\n")
+    logging.info(f"{client.host_to_requests_limiter=}\n")
 
 
 async def sequential_requests_without_limits_run() -> None:
@@ -233,7 +245,7 @@ async def sequential_requests_without_limits_run() -> None:
     for i in range(15):
         await client.request(f"host-a {i+1}")
     await client.close()
-    logging.info(f"{client.host_to_requests_info=}\n")
+    logging.info(f"{client.host_to_requests_limiter=}\n")
 
 
 async def main() -> None:

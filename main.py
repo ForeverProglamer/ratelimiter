@@ -1,15 +1,23 @@
 import asyncio
 import logging
 import time
-from collections import defaultdict, Counter
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, UTC, timedelta
 from enum import StrEnum
 
-from tenacity import before_log, retry, stop_after_attempt, wait_fixed, retry_if_exception_type
+from tenacity import (
+    before_log,
+    retry,
+    stop_after_attempt,
+    wait_fixed,
+    retry_if_exception_type
+)
 
 datefmt = "%H:%M:%S"
-logging.basicConfig(format="%(asctime)s %(message)s", datefmt=datefmt, level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s %(message)s", datefmt=datefmt, level=logging.INFO
+)
 logging.Formatter.converter = time.gmtime
 logger = logging.getLogger(__name__)
 
@@ -21,10 +29,17 @@ class RateLimit:
     reset: datetime
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}(limit={self.limit}, remaining={self.remaining}, reset={self.reset.strftime(datefmt)})"
+        return (
+            f"{type(self).__name__}(limit={self.limit}, "
+            f"remaining={self.remaining}, reset={self.reset.strftime(datefmt)})"
+        )
 
 
-def generate_server_response_headers(requests_count: int = 20, ratelimit_limit: int = 5, ratelimit_reset_duration_s: int = 5) -> list[RateLimit]:
+def generate_server_response_headers(
+    requests_count: int = 20,
+    ratelimit_limit: int = 5,
+    ratelimit_reset_duration_s: int = 5
+) -> list[RateLimit]:
     ratelimit_reset = datetime.now(UTC)
     headers = []
     for i in range(requests_count):
@@ -148,7 +163,13 @@ class HttpClient:
         wait=wait_fixed(0.5),
         before=before_log(logger, logging.DEBUG)
     )
-    async def request(self, url: str, ratelimit: RateLimit | None = None, raise_error: bool = False, retryable_error: bool = True) -> None:
+    async def request(
+        self,
+        url: str,
+        ratelimit: RateLimit | None = None,
+        raise_error: bool = False,
+        retryable_error: bool = True
+    ) -> None:
         host, id_ = url.split(" ")
         requests_limiter = self._get_requests_limiter(host)
         
@@ -168,7 +189,12 @@ class HttpClient:
             requests_limiter.requests_sent_in_time_window += 1
             requests_limiter.next_stage()
 
-    async def _send_request(self, url: str, ratelimit: RateLimit | None = None, raise_error: bool = False, retryable_error: bool = True) -> None:
+    async def _send_request(
+        self, url: str,
+        ratelimit: RateLimit | None = None,
+        raise_error: bool = False,
+        retryable_error: bool = True
+    ) -> None:
         host, _ = url.split(" ")
         requests_limiter = self._get_requests_limiter(host)
 
@@ -197,7 +223,10 @@ async def concurrent_requests_single_host_run() -> None:
     logging.info("Concurrent Requests Single Host Run")
     client = HttpClient()
     await asyncio.gather(
-        *[client.request(f"host-a {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(15))],
+        *[
+            client.request(f"host-a {i+1}", ratelimit)
+            for i, ratelimit in enumerate(generate_server_response_headers(15))
+        ],
     )
     await client.close()
     logging.info(f"{client.host_to_requests_limiter=}\n")
@@ -207,8 +236,14 @@ async def concurrent_requests_multiple_hosts_run() -> None:
     logging.info("Concurrent Requests Multiple Hosts Run")
     client = HttpClient()
     await asyncio.gather(
-        *[client.request(f"host-b {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(15))],
-        *[client.request(f"host-c {i+1}", ratelimit) for i, ratelimit in enumerate(generate_server_response_headers(10))]
+        *[
+            client.request(f"host-b {i+1}", ratelimit)
+            for i, ratelimit in enumerate(generate_server_response_headers(15))
+        ],
+        *[
+            client.request(f"host-c {i+1}", ratelimit)
+            for i, ratelimit in enumerate(generate_server_response_headers(10))
+        ]
     )
     await client.close()
     logging.info(f"{client.host_to_requests_limiter=}\n")
@@ -217,7 +252,9 @@ async def concurrent_requests_multiple_hosts_run() -> None:
 async def sequential_requests_single_host_run() -> None:
     logging.info("Sequential Requests Single Host Run")
     client = HttpClient()
-    for i, ratelimit in enumerate(generate_server_response_headers(requests_count=6, ratelimit_limit=2)):
+    for i, ratelimit in enumerate(
+        generate_server_response_headers(requests_count=6, ratelimit_limit=2)
+    ):
         await client.request(f"host-d {i+1}", ratelimit)
     await client.close()
     logging.info(f"{client.host_to_requests_limiter=}\n")
@@ -226,9 +263,15 @@ async def sequential_requests_single_host_run() -> None:
 async def concurrent_requests_single_host_retry_run() -> None:
     logging.info("Concurrent Requests Single Host Run | Retry")
     client = HttpClient()
-    data = [(f"host-a {i+1}", ratelimit, i in (1, 2), i != 2) for i, ratelimit in enumerate(generate_server_response_headers(15)[:3])]
+    data = [
+        (f"host-a {i+1}", ratelimit, i in (1, 2), i != 2)
+        for i, ratelimit in enumerate(generate_server_response_headers(15)[:3])
+    ]
     result = await asyncio.gather(
-        *[client.request(url, ratelimit, raise_error, retryable_error) for url, ratelimit, raise_error, retryable_error in data],
+        *[
+            client.request(url, ratelimit, raise_error, retryable_error)
+            for url, ratelimit, raise_error, retryable_error in data
+        ],
         return_exceptions=True
     )
     logging.info(f"{result=}")
